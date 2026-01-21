@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # Enables the manual "Run workflow" button
+  workflow_dispatch: # Manual release button enabled
 
 permissions:
   contents: write
@@ -29,17 +29,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Cargo and vcpkg
+      # Use the built-in Cache action for Rust
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            vcpkg
-          key: ${{ runner.os }}-build-v3-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-build-v3-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,29 +51,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxml2-dev pkg-config
 
-      # ---------- Windows dependencies (Absolute Path Fix) ----------
+      # ---------- Windows dependencies (Using System vcpkg) ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
-        shell: powershell
         run: |
-          if (!(Test-Path "vcpkg")) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg.git
-          }
-          
-          if (!(Test-Path "vcpkg/vcpkg.exe")) {
-            ./vcpkg/bootstrap-vcpkg.bat
-          }
-
-          # Create an absolute path to vcpkg.exe
-          $VCPKG_DIR = Get-Location
-          $VCPKG_EXE = Join-Path $VCPKG_DIR "vcpkg\vcpkg.exe"
-          
-          # Execute using the call operator & and absolute path
-          & $VCPKG_EXE install libxml2:x64-windows-static-md
-
-          # Export variables for the 'Build' step
-          "VCPKG_ROOT=$VCPKG_DIR/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          vcpkg install libxml2:x64-windows-static-md
+          # Tell Rust where vcpkg is (GitHub sets this env var automatically)
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
 
       # ---------- Build ----------
       - name: Build Binary
@@ -86,10 +68,10 @@ jobs:
       - name: Prepare Artifact
         shell: bash
         run: |
-          # Robustly find binary name using jq
+          # Robustly find binary name
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name')
           
-          # Set VERSION based on Tag or Manual run
+          # Handle versioning for tags vs manual runs
           if [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
@@ -101,6 +83,29 @@ jobs:
              "dist/${BIN_NAME}-${VERSION}-${{ matrix.platform }}${{ matrix.exe_suffix }}"
 
       - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
         with:
           name: binary-${{ matrix.platform }}
           path: dist/*
