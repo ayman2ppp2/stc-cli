@@ -1,0 +1,61 @@
+# Create or update a tag and GitHub Release using the version in Cargo.toml on every push to master
+name: Auto Release from Cargo.toml
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          set -e
+          # Read first occurrence of version = "x.y.z" from Cargo.toml
+          version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
+          if [ -z "$version" ]; then
+            echo "Cannot find version in Cargo.toml"
+            exit 1
+          fi
+          echo "Found version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update tag
+        env:
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "Tagging commit ${GITHUB_SHA} with $TAG"
+          # If tag exists, move it to this commit (force). Otherwise create it.
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — force-updating to this commit"
+            git tag -f "$TAG"
+          else
+            git tag "$TAG"
+          fi
+          # Push tag (force in case it was updated)
+          git push origin "refs/tags/$TAG" --force
+
+      - name: Create or update GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          body: |
+            Automated release for commit ${{ github.sha }}
+            Branch: ${{ github.ref }}
+          draft: false
+          prerelease: false
