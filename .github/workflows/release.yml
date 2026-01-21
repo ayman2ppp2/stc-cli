@@ -31,77 +31,85 @@ jobs:
             exe_suffix: ""
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # -------- macOS dependencies --------
+      - name: Install libxml2 (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew install libxml2 pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
+
+      # -------- Windows dependencies --------
+      - name: Install libxml2 (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg.exe install libxml2:x64-windows
+          echo "VCPKG_ROOT=$PWD\vcpkg" >> $env:GITHUB_ENV
 
       - name: Read version from Cargo.toml
         id: version
         shell: bash
         run: |
-          set -e
           version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
-          if [ -z "$version" ]; then
-            echo "Cannot find version in Cargo.toml"
-            exit 1
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Build release binary
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package artifact
+      - name: Package binary
         shell: bash
         run: |
-          set -e
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[0].targets[] | select(.kind[]=="bin") | .name' \
             | head -n1)
 
-          ARTIFACT_NAME="${BIN_NAME}-v${{ steps.version.outputs.version }}-${{ matrix.platform }}"
           mkdir -p dist
+          cp target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }} \
+             dist/${BIN_NAME}-v${{ steps.version.outputs.version }}-${{ matrix.platform }}${{ matrix.exe_suffix }}
 
-          cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }}" "dist/${ARTIFACT_NAME}${{ matrix.exe_suffix }}"
-
-          echo "Packaged ${ARTIFACT_NAME}"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
           path: dist/*
-          if-no-files-found: error
 
   release:
-    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Read version from Cargo.toml
+      - name: Read version
         id: version
         run: |
-          set -e
           version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: dist
 
-      - name: Create or update tag
+      - name: Tag
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git tag -f v${{ steps.version.outputs.version }}
+          git push origin --tags --force
+
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          artifacts: dist/**/*      - name: Create or update tag
         env:
           TAG: v${{ steps.version.outputs.version }}
         run: |
