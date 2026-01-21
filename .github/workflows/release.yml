@@ -1,9 +1,10 @@
-name: Auto Release from Cargo.toml (Linux / Windows / macOS)
+name: Release Binaries
 
+# 1. TRIGGER: Only run when a tag starting with 'v' is pushed (e.g. v1.0.0)
 on:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -12,7 +13,6 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-
     strategy:
       fail-fast: false
       matrix:
@@ -26,14 +26,26 @@ jobs:
             target: x86_64-pc-windows-msvc
             exe_suffix: ".exe"
           - platform: macos
-            os: macos-latest
+            os: macos-13 # Explicitly using Intel Mac to match x86 target
             target: x86_64-apple-darwin
             exe_suffix: ""
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # 2. CACHING: Vital for Windows/vcpkg speed
+      - name: Cache Cargo registry and vcpkg
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            vcpkg_installed
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -55,81 +67,62 @@ jobs:
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
         shell: powershell
+        # We use vcpkg, but check if it's already cached to save time
         run: |
-          git clone https://github.com/microsoft/vcpkg.git
-          cd vcpkg
-          .\bootstrap-vcpkg.bat
-          .\vcpkg.exe install libxml2:x64-windows
-
-          $vcpkgRoot = (Get-Location).Path
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      # ---------- Read version ----------
-      - name: Read version from Cargo.toml
-        id: version
-        shell: bash
-        run: |
-          set -e
-          version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if (!(Test-Path "vcpkg")) {
+            git clone https://github.com/microsoft/vcpkg.git
+            cd vcpkg
+            .\bootstrap-vcpkg.bat
+          }
+          # Install libxml2 static 
+          .\vcpkg\vcpkg.exe install libxml2:x64-windows-static-md
+          
+          # CRITICAL: Set environment variables so build.rs finds the library
+          echo "VCPKG_ROOT=$((Get-Location).Path)\vcpkg" >> $env:GITHUB_ENV
+          echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
 
       # ---------- Build ----------
-      - name: Build
-        env:
-          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+      - name: Build Binary
+        shell: bash
         run: cargo build --release --target ${{ matrix.target }}
 
       # ---------- Package ----------
-      - name: Package binary
+      - name: Prepare Artifact
         shell: bash
         run: |
-          set -e
-          BIN_NAME=$(cargo metadata --no-deps --format-version 1 \
-            | sed -n 's/.*"name":"\([^"]*\)".*"kind":\["bin"\].*/\1/p' \
-            | head -n1)
-
+          # Use jq for reliable parsing
+          BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name')
+          
+          # Extract version from the GIT TAG (more reliable than parsing Cargo.toml)
+          VERSION=${GITHUB_REF#refs/tags/}
+          
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }}" \
-             "dist/${BIN_NAME}-v${{ steps.version.outputs.version }}-${{ matrix.platform }}${{ matrix.exe_suffix }}"
+             "dist/${BIN_NAME}-${VERSION}-${{ matrix.platform }}${{ matrix.exe_suffix }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform }}
+          name: binary-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
 
   release:
-    name: Create GitHub Release
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Read version
-        id: version
-        run: |
-          version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
+          pattern: binary-*
           path: dist
+          merge-multiple: true
 
-      - name: Create or update tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f v${{ steps.version.outputs.version }}
-          git push origin --tags --force
-
-      - name: Create or update GitHub Release
-        uses: ncipollo/release-action@v1
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
-          artifacts: dist/**/*
+          files: dist/*
           draft: false
           prerelease: false
+          generate_release_notes: true
