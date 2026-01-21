@@ -1,0 +1,5 @@
+<root>
+    <child attr="value">text content</child>
+    <!-- comment -->
+    <child2>more text</child2>
+</root>
