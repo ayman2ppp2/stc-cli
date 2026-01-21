@@ -24,10 +24,6 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             exe_suffix: ".exe"
-          - platform: macos
-            os: macos-latest # Using latest (ARM64) but cross-compiling for x86_64
-            target: x86_64-apple-darwin
-            exe_suffix: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -57,28 +53,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxml2-dev pkg-config
 
-      # ---------- macOS dependencies ----------
-      - name: Install libxml2 (macOS)
-        if: matrix.platform == 'macos'
-        run: |
-          brew install libxml2 pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
-
       # ---------- Windows dependencies (Fixed Paths) ----------
+            # ---------- Windows dependencies (Final Fix) ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
         shell: powershell
         run: |
+          # Clone vcpkg if not cached
           if (!(Test-Path "vcpkg")) {
             git clone --depth 1 https://github.com/microsoft/vcpkg.git
+          }
+          
+          # Bootstrap it only if the exe doesn't exist
+          if (!(Test-Path "vcpkg/vcpkg.exe")) {
             ./vcpkg/bootstrap-vcpkg.bat
           }
-          $VCPKG_EXE = "$((Get-Location).Path)\vcpkg\vcpkg.exe"
-          & $VCPKG_EXE install libxml2:x64-windows-static-md
 
-          $vcpkgRoot = "$((Get-Location).Path)\vcpkg"
+          # Use a variable with a direct path string
+          $vcpkgExe = "vcpkg/vcpkg.exe"
+          & $vcpkgExe install libxml2:x64-windows-static-md
+
+          # Set environment variables using forward slashes for compatibility
+          $vcpkgRoot = "$(Get-Location)/vcpkg"
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+
 
       # ---------- Build ----------
       - name: Build Binary
