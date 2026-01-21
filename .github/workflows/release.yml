@@ -1,10 +1,9 @@
-name: Release Binaries
+name: Auto Release from Cargo.toml
 
-# 1. TRIGGER: Only run when a tag starting with 'v' is pushed (e.g. v1.0.0)
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # Triggers only when you push a tag like v1.0.0
 
 permissions:
   contents: write
@@ -26,23 +25,25 @@ jobs:
             target: x86_64-pc-windows-msvc
             exe_suffix: ".exe"
           - platform: macos
-            os: macos-13 # Explicitly using Intel Mac to match x86 target
+            os: macos-latest # Using latest (ARM64) but cross-compiling for x86_64
             target: x86_64-apple-darwin
             exe_suffix: ""
 
     steps:
       - uses: actions/checkout@v4
 
-      # 2. CACHING: Vital for Windows/vcpkg speed
-      - name: Cache Cargo registry and vcpkg
-        uses: actions/cache@v3
+      # Caching saves ~15 minutes on Windows builds
+      - name: Cache Cargo and vcpkg
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            vcpkg_installed
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            vcpkg
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -63,23 +64,21 @@ jobs:
           brew install libxml2 pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
 
-      # ---------- Windows dependencies ----------
+      # ---------- Windows dependencies (Fixed Paths) ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
         shell: powershell
-        # We use vcpkg, but check if it's already cached to save time
         run: |
           if (!(Test-Path "vcpkg")) {
-            git clone https://github.com/microsoft/vcpkg.git
-            cd vcpkg
-            .\bootstrap-vcpkg.bat
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git
+            ./vcpkg/bootstrap-vcpkg.bat
           }
-          # Install libxml2 static 
-          .\vcpkg\vcpkg.exe install libxml2:x64-windows-static-md
-          
-          # CRITICAL: Set environment variables so build.rs finds the library
-          echo "VCPKG_ROOT=$((Get-Location).Path)\vcpkg" >> $env:GITHUB_ENV
-          echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+          $VCPKG_EXE = "$((Get-Location).Path)\vcpkg\vcpkg.exe"
+          & $VCPKG_EXE install libxml2:x64-windows-static-md
+
+          $vcpkgRoot = "$((Get-Location).Path)\vcpkg"
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # ---------- Build ----------
       - name: Build Binary
@@ -90,10 +89,10 @@ jobs:
       - name: Prepare Artifact
         shell: bash
         run: |
-          # Use jq for reliable parsing
+          # Use jq for robust JSON parsing of binary name
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name')
           
-          # Extract version from the GIT TAG (more reliable than parsing Cargo.toml)
+          # Get version from the Git Tag
           VERSION=${GITHUB_REF#refs/tags/}
           
           mkdir -p dist
@@ -107,7 +106,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -120,7 +119,7 @@ jobs:
           merge-multiple: true
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           draft: false
