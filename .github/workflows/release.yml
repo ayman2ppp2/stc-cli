@@ -3,7 +3,8 @@ name: Auto Release from Cargo.toml
 on:
   push:
     tags:
-      - 'v*' # Triggers only when you push a tag like v1.0.0
+      - 'v*'
+  workflow_dispatch: # Enables the manual "Run workflow" button
 
 permissions:
   contents: write
@@ -28,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Caching saves ~15 minutes on Windows builds
       - name: Cache Cargo and vcpkg
         uses: actions/cache@v4
         with:
@@ -37,9 +37,9 @@ jobs:
             ~/.cargo/git
             target
             vcpkg
-          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-build-v3-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-build-
+            ${{ runner.os }}-build-v3-
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,31 +53,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxml2-dev pkg-config
 
-      # ---------- Windows dependencies (Fixed Paths) ----------
-            # ---------- Windows dependencies (Final Fix) ----------
+      # ---------- Windows dependencies (Absolute Path Fix) ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
         shell: powershell
         run: |
-          # Clone vcpkg if not cached
           if (!(Test-Path "vcpkg")) {
             git clone --depth 1 https://github.com/microsoft/vcpkg.git
           }
           
-          # Bootstrap it only if the exe doesn't exist
           if (!(Test-Path "vcpkg/vcpkg.exe")) {
             ./vcpkg/bootstrap-vcpkg.bat
           }
 
-          # Use a variable with a direct path string
-          $vcpkgExe = "vcpkg/vcpkg.exe"
-          & $vcpkgExe install libxml2:x64-windows-static-md
+          # Create an absolute path to vcpkg.exe
+          $VCPKG_DIR = Get-Location
+          $VCPKG_EXE = Join-Path $VCPKG_DIR "vcpkg\vcpkg.exe"
+          
+          # Execute using the call operator & and absolute path
+          & $VCPKG_EXE install libxml2:x64-windows-static-md
 
-          # Set environment variables using forward slashes for compatibility
-          $vcpkgRoot = "$(Get-Location)/vcpkg"
-          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Export variables for the 'Build' step
+          "VCPKG_ROOT=$VCPKG_DIR/vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Append
-
 
       # ---------- Build ----------
       - name: Build Binary
@@ -88,11 +86,15 @@ jobs:
       - name: Prepare Artifact
         shell: bash
         run: |
-          # Use jq for robust JSON parsing of binary name
+          # Robustly find binary name using jq
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name')
           
-          # Get version from the Git Tag
-          VERSION=${GITHUB_REF#refs/tags/}
+          # Set VERSION based on Tag or Manual run
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="manual-$(git rev-parse --short HEAD)"
+          fi
           
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }}" \
@@ -107,10 +109,11 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
+    # Only create a real GitHub Release if a tag was pushed
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           pattern: binary-*
@@ -121,6 +124,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          draft: false
-          prerelease: false
           generate_release_notes: true
