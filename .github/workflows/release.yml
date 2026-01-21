@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: # Manual release button enabled
+  workflow_dispatch: 
 
 permissions:
   contents: write
@@ -29,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Use the built-in Cache action for Rust
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -51,27 +50,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxml2-dev pkg-config
 
-      # ---------- Windows dependencies (Using System vcpkg) ----------
+      # ---------- Windows dependencies ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
         run: |
           vcpkg install libxml2:x64-windows-static-md
-          # Tell Rust where vcpkg is (GitHub sets this env var automatically)
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
 
-      # ---------- Build ----------
+      # ---------- Build (Fixing the Linker Error) ----------
       - name: Build Binary
         shell: bash
+        env:
+          # This tells the Windows linker to include bcrypt.lib and ws2_32.lib
+          RUSTFLAGS: ${{ matrix.platform == 'windows' && '-C link-arg=bcrypt.lib -C link-arg=ws2_32.lib' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
       # ---------- Package ----------
       - name: Prepare Artifact
         shell: bash
         run: |
-          # Robustly find binary name
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[] | select(.kind[] | contains("bin")) | .name')
           
-          # Handle versioning for tags vs manual runs
           if [[ $GITHUB_REF == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
