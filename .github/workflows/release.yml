@@ -37,49 +37,69 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # -------- macOS dependencies --------
+      # ---------- Linux dependencies ----------
+      - name: Install libxml2 (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-dev pkg-config
+
+      # ---------- macOS dependencies ----------
       - name: Install libxml2 (macOS)
         if: matrix.platform == 'macos'
         run: |
           brew install libxml2 pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
 
-      # -------- Windows dependencies --------
+      # ---------- Windows dependencies ----------
       - name: Install libxml2 (Windows)
         if: matrix.platform == 'windows'
+        shell: powershell
         run: |
           git clone https://github.com/microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg.exe install libxml2:x64-windows
-          echo "VCPKG_ROOT=$PWD\vcpkg" >> $env:GITHUB_ENV
+          cd vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg.exe install libxml2:x64-windows
 
+          $vcpkgRoot = (Get-Location).Path
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---------- Read version ----------
       - name: Read version from Cargo.toml
         id: version
         shell: bash
         run: |
+          set -e
           version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -n1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # ---------- Build ----------
       - name: Build
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      # ---------- Package ----------
       - name: Package binary
         shell: bash
         run: |
+          set -e
           BIN_NAME=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[0].targets[] | select(.kind[]=="bin") | .name' \
+            | sed -n 's/.*"name":"\([^"]*\)".*"kind":\["bin"\].*/\1/p' \
             | head -n1)
 
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }} \
-             dist/${BIN_NAME}-v${{ steps.version.outputs.version }}-${{ matrix.platform }}${{ matrix.exe_suffix }}
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.exe_suffix }}" \
+             "dist/${BIN_NAME}-v${{ steps.version.outputs.version }}-${{ matrix.platform }}${{ matrix.exe_suffix }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
           path: dist/*
+          if-no-files-found: error
 
   release:
+    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
 
@@ -98,42 +118,18 @@ jobs:
         with:
           path: dist
 
-      - name: Tag
+      - name: Create or update tag
         run: |
-          git config user.name github-actions[bot]
-          git config user.email github-actions[bot]@users.noreply.github.com
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -f v${{ steps.version.outputs.version }}
           git push origin --tags --force
 
-      - uses: ncipollo/release-action@v1
-        with:
-          tag: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
-          artifacts: dist/**/*      - name: Create or update tag
-        env:
-          TAG: v${{ steps.version.outputs.version }}
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            git tag -f "$TAG"
-          else
-            git tag "$TAG"
-          fi
-
-          git push origin "refs/tags/$TAG" --force
-
-      - name: Create or update GitHub Release and upload assets
+      - name: Create or update GitHub Release
         uses: ncipollo/release-action@v1
         with:
           tag: v${{ steps.version.outputs.version }}
           name: Release v${{ steps.version.outputs.version }}
-          body: |
-            Automated release for commit ${{ github.sha }}
-            Branch: ${{ github.ref }}
+          artifacts: dist/**/*
           draft: false
           prerelease: false
-          artifacts: |
-            dist/**/*
