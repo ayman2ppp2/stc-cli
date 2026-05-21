@@ -1,11 +1,29 @@
-use std::fs;
+use std::{env, fs, process};
+
 use xml_c14n::{CanonicalizationMode, CanonicalizationOptions, canonicalize_xml};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let input = "input.xml";
-    let output = "output.xml";
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("stc-cli error: {err}");
+        process::exit(1);
+    }
+}
 
-    let xml = fs::read_to_string(input)?;
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() != 3 {
+        return Err(format!(
+            "Usage: {} <input.xml> <output.xml>",
+            args.first().map(String::as_str).unwrap_or("stc-cli")
+        )
+        .into());
+    }
+
+    let input_path = &args[1];
+    let output_path = &args[2];
+
+    let xml = fs::read_to_string(input_path)?;
     let canonicalized = canonicalize_xml(
         &xml,
         CanonicalizationOptions {
@@ -15,7 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    fs::write(output, canonicalized)?;
-    println!("Canonicalized {} to {}", input, output);
+    fs::write(output_path, canonicalized)?;
+
+    println!("Canonicalized {input_path} to {output_path}");
+
     Ok(())
 }

@@ -1,7 +1,10 @@
 [package]
 name = "stc-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 xml_c14n = "0.3"
+
+[dev-dependencies]
+sha2 = "0.10"
